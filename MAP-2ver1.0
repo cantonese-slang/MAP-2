@@ -1,0 +1,1383 @@
+const props = PropertiesService.getScriptProperties()
+const SPREADSHEET_ID = props.getProperty('SPREADSHEET_ID')
+const OPENAI_APIKEY = props.getProperty('OPENAI_APIKEY')
+const LINE_ACCESS_TOKEN = props.getProperty('LINE_ACCESS_TOKEN')
+const MAX_DAILY_USAGE = parseInt(props.getProperty('MAX_DAILY_USAGE'))
+const MAX_TOKEN_NUM = 2000
+const SHEET_NUMBER = 50
+const errorMessage = '現在アクセスが集中しているため、しばらくしてからもう一度お試しください。'
+const countMaxMessage = `1日の最大使用回数${MAX_DAILY_USAGE}回を超過しました。`
+
+/*追加*/
+//絵文字
+var EMOJI_HAPPY = "\uDBC0\uDC01"  //わーい
+var EMOJI_MOON_GRIN = "\uDBC0\uDC8D"; //えへへ
+var EMOJI_FROZEN = "\uDBC0\uDC83";  //固まる
+var EMOJI_TIRED = "\uDBC0\uDC17";  //ごめん
+var EMOJI_SHINY = "\uDBC0\uDC2D";  //きらきら
+var EMOJI_OK = "\uDBC0\uDC33";  //OK
+var EMOJI_EIGHTHNOTE = "\uDBC0\uDC39";  //音符
+var EMOJI_STAR = "\uDBC0\uDCB2";  //スター
+var EMOJI_TRAIN = "\uDBC0\uDC47"; //電車
+var EMOJI_BUILDING = "\uDBC0\uDC4C"; //ビル
+var EMOJI_POSTOFFICE = "\uDBC0\uDC4D"; //郵便局
+var EMOJI_HOSPITAL = "\uDBC0\uDC4E"; //病院
+var EMOJI_SCHOOL = "\uDBC0\uDC4F"; //学校
+var EMOJI_SPA = "\uDBC0\uDC51";  //温泉
+//Google Maps APIのAPIキー
+const MAPS_APIKEY1 = "AIzaSyAvLX9weu6x2O5N4aowaAxijia3rwCEUcQ";
+const MAPS_APIKEY2 = "AIzaSyDlJG5f4CHJwwbd5Kg2pYEo8ImyzsMTHas";
+const MAPS_APIKEY3 = "AIzaSyA0lubgRpV3z3-pYJbpm1tAuaenknjgVf4";
+
+/*
+ エラー発生メール送信
+  errDescription：エラー内容
+*/
+function sendErrorMail(errDescription) {
+
+    //宛先
+    var toAddress = "bestinksalesman@gmail.com";
+    //件名
+    var subject = "【LINEBOT】エラー発生のお知らせ";
+    //メール内容
+    var body = "「公式LINE旅行大使リーさん」よりエラー発生をお知らせします。\n\n"
+        + "■エラー内容\n" + errDescription
+
+    //Gmail送信
+    MailApp.sendEmail({
+        "to": toAddress,
+        "subject": subject,
+        "body": body,
+        "noReply": true
+    });
+}
+
+
+
+/*==============================
+ LINEメッセージ作成
+==============================*/
+/*
+ ウェルカムメッセージ作成
+*/
+function welcomeMessage() {
+    var msg = {
+        "type": "text",
+        "text": "友だち登録ありがとうございます" + EMOJI_HAPPY + "\n\n"
+            + "周辺のレストラン情報を、口コミランキング順に紹介いたします"
+            + EMOJI_SHINY + EMOJI_SHINY + "\n\n"
+            + "Powered by Google Maps API でございます" + EMOJI_MOON_GRIN
+    };
+    return msg;
+}
+/*
+ 住所確認メッセージ作成
+*/
+function confirmAddressMessage() {
+    var msg = {
+        "type": "text",
+        "text": "それでは、調べたい場所の「住所」を教えてね！\n\n"
+            + "近くにある「ランドマーク」(目印となる場所)"
+            + "の名前でもお調べしますよ。\n"
+            + EMOJI_TRAIN + EMOJI_BUILDING + EMOJI_POSTOFFICE + EMOJI_HOSPITAL + EMOJI_SCHOOL + EMOJI_SPA + "\n\n"
+            + "現在地の情報ならば、左下の＋ボタンから「位置情報」を送信すると簡単かも" + EMOJI_OK
+    };
+    return msg;
+}
+/*
+ キーワード確認メッセージ作成
+*/
+function confirmKeywordMessage() {
+    var msg = {
+        "type": "text",
+        "text": "気になるお店のジャンルはあるかしら？\n\n"
+            + "例えば「寿司」「ラーメン」「イタリアン」「タイ料理」とかで絞り込むことができるわ"
+            + EMOJI_HAPPY + "\n\n"
+            + "特にない場合は「なし」とつぶやいてね！"
+    };
+    return msg;
+}
+/*
+ 住所検索結果ゼロのメッセージ作成
+*/
+function zeroAddressMessage() {
+    var msg = {
+        "type": "text",
+        "text": "ごめんなさい！\n"
+            + "教えてくれた住所が見つからなかったの" + EMOJI_TIRED + "\n\n"
+            + "もう一度、別の住所をお願いできるかしら" + EMOJI_MOON_GRIN
+    };
+    return msg;
+}
+/*
+ お店検索結果ゼロのメッセージ作成
+  row：ユーザ情報の対象行
+*/
+function zeroPlaceMessage(row) {
+    //検索住所
+    var address = getSearchAddress(row);
+    //検索キーワード
+    var keyword = getSearchKeyword(row);
+    if (keyword == "") {
+        keyword = "指定なし";
+    }
+
+    var msg = {
+        "type": "text",
+        "text": "残念！\n"
+            + "お店がみつからなかったわ" + EMOJI_TIRED + "\n\n"
+            + "検索場所：" + address + "\n"
+            + "ジャンル：" + keyword + "\n\n"
+            + "他の場所とジャンルで探してみましょうか？\n"
+            + "もう一度、住所から教えてね" + EMOJI_MOON_GRIN
+    };
+    return msg;
+}
+/*
+ Google Maps APIのエラーメッセージ作成
+  title：エラータイトル
+  status：エラーのステータス
+*/
+function googleErrorMessage(title, status) {
+    var msg;
+
+    switch (status) {
+        case "OVER_QUERY_LIMIT":
+            //利用制限超過
+            msg = {
+                "type": "text",
+                "text": "あらら。パワー切れみたい！\n\n"
+                    + "沢山の方からご利用いただいたので、本日はサービス終了です。\n"
+                    + "1日に利用できるリクエスト数が決まっているの" + EMOJI_TIRED + "\n\n"
+                    + "明日のご利用をお待ちしております" + EMOJI_MOON_GRIN
+            };
+
+            break;
+        default:
+            //その他のエラー
+            msg = {
+                "type": "text",
+                "text": "ガガガガガガガガ・・・ピー！\n\n"
+                    + "あわわわわ！システムエラーで固まっちゃった" + EMOJI_FROZEN + "\n\n"
+                    + "エンジニアさんに連絡して調べてもらうので、また後日ご利用くださいね" + EMOJI_TIRED
+            };
+
+            //エラーを管理者にメール通知
+            sendErrorMail(title + status);
+
+            break;
+    };
+
+    return msg;
+}
+/*
+ 検索完了メッセージ作成
+  row：ユーザ情報の対象行
+*/
+function searchFinishMessage(address, keyword, completed_count) {
+    //検索住所
+    var address = address;
+    //検索キーワード
+    var keyword = keyword;
+    if (keyword == "") {
+        keyword = "(指定なし)";
+    }
+    //検索件数
+    var resultCnt = completed_count;
+
+    var msg = {
+        "type": "text",
+        "text": "お待たせしました！検索結果が出ましたよ" + EMOJI_EIGHTHNOTE + "\n\n"
+            + "検索場所：" + address + "\n"
+            + "ジャンル：" + keyword + "\n\n"
+            + "【検索結果】" + resultCnt + "件\n\n"
+            + "口コミランキング順にお店を紹介します" + EMOJI_STAR + EMOJI_STAR + EMOJI_STAR + "\n\n"
+            + "検索するジャンルを変更したい場合は、新しいジャンルをつぶやいてくださいね" + EMOJI_OK
+    };
+
+    return msg;
+}
+/*==============================
+ LINEメッセージ作成ここまで
+==============================*/
+
+/// 以下の部分をお好きな人格に変更します。
+const systemPrompt = `
+あなたはユーザーの親友です。
+ユーザーと気さくに話します。
+`
+
+const gc = bmSimpleCrypto.GasCrypt;
+let secret = 'secret';
+let sc = gc.newCrypto(secret);
+
+function systemRole() {
+    return { "role": "system", "content": systemPrompt }
+}
+
+function createSheets() {
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    for (var i = 1; i <= SHEET_NUMBER; i++) {
+        ss.insertSheet(i.toString());
+    }
+}
+
+function debug(value) {
+    const sheet = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const ss = sheet.getSheetByName('logs');
+    const date = new Date();
+    const targetRow = ss.getLastRow() + 1;
+    ss.getRange('A' + targetRow).setValue(date);
+    ss.getRange('B' + targetRow).setValue(value);
+}
+
+function getUserCell(userId) {
+    const sheet = SpreadsheetApp.openById(SPREADSHEET_ID);
+    let sheetId = hashString(userId, SHEET_NUMBER)
+    let rowId = hashString(userId, 8000)
+    let columnId = numberToAlphabet(hashString(userId, 26))
+    const ss = sheet.getSheetByName(sheetId);
+    return ss.getRange(columnId + rowId)
+}
+
+function numberToAlphabet(num) {
+    return String.fromCharCode(64 + num);
+}
+
+
+function hashString(userId, m) {
+    let hash = 0;
+    for (let i = 0; i < userId.length; i++) {
+        hash = ((hash << 5) - hash) + userId.charCodeAt(i);
+        hash |= 0; // Convert to 32bit integer
+    }
+    return (Math.abs(hash) % m) + 1
+}
+
+//変更
+function insertValue(cell, messages, userId, botReply, updatedDate, dailyUsage,
+    status, address, lat, lng, keyword, searchCount, completed_count, searchResult) {
+    debug("insert開始");
+    let newMessages = messages;
+    debug("botReplyある？" + botReply);
+    if (botReply)
+        newMessages = [...messages, { 'role': 'assistant', 'content': botReply }]
+    debug("ぬけた:" + newMessages);
+
+    const encryptedMessages = []
+    for (var i = 0; i < newMessages.length; i++) {
+        encryptedMessages.push({ "role": newMessages[i]['role'], "content": sc.encrypt(newMessages[i]['content']) })
+    }
+    debug("メッセージ作成完了" + encryptedMessages);
+
+    const userObj = {
+        userId: userId,
+        messages: encryptedMessages,
+        updatedDateString: updatedDate.toISOString(),
+        dailyUsage: dailyUsage,
+        status: status,
+        address: address,
+        lat: lat,
+        lng: lng,
+        keyword: keyword,
+        searchCount: searchCount,
+        completed_count: completed_count,
+        searchResult: searchResult,
+    };
+    
+    debug("user作成完了" + userObj);
+    cell.setValue((JSON.stringify(userObj)));
+    debug("userセット完了保存終了");
+}
+
+function deleteValue(cell, userId, updatedDateString, dailyUsage) {
+    const userObj = {
+        userId: userId,
+        messages: [],
+        updatedDateString: updatedDateString,
+        dailyUsage: dailyUsage,
+        status: "",
+        address: "",
+        lat: "",
+        lng: "",
+        keyword: "",
+        searchCount: 0,
+        completed_count: 0,
+        searchResult: [],
+    }
+    cell.setValue(JSON.stringify(userObj))
+}
+
+function buildMessages(previousContext, userMessage = null) {
+    if (userMessage) {
+        if (previousContext.length == 0) {
+            return [systemRole(), { "role": "user", "content": userMessage }]
+        }
+        const messages = [...previousContext, { "role": "user", "content": userMessage }]
+        var tokenNum = 0
+        for (var i = 0; i < messages.length; i++) {
+            tokenNum += messages[i]['content'].length
+        }
+
+        /// メッセージが長すぎる時は削除する
+        while (MAX_TOKEN_NUM < tokenNum && 2 < messages.length) {
+            tokenNum -= messages[1]['content'].length
+            messages.splice(1, 1);
+        }
+        return messages
+    } else {
+        return previousContext;
+    }
+}
+
+function callLineApi(replyText, replyToken) {
+    const url = 'https://api.line.me/v2/bot/message/reply';
+    UrlFetchApp.fetch(url, {
+        'headers': {
+            'Content-Type': 'application/json; charset=UTF-8',
+            'Authorization': 'Bearer ' + LINE_ACCESS_TOKEN,
+        },
+        'method': 'post',
+        'payload': JSON.stringify({
+            'replyToken': replyToken,
+            'messages': [{
+                'type': 'text',
+                'text': replyText,
+            }]
+        })
+    });
+}
+
+function doPost(e) {
+    debug("doPost()関数の開始");
+    const event = JSON.parse(e.postData.contents).events[0];
+    const replyToken = event.replyToken;
+    const userId = event.source.userId;
+    const nowDate = new Date();
+    const eventType = event.type; //追加
+    debug("関数に入りました");
+
+    let cell;
+    try {
+        cell = getUserCell(userId);
+    } catch (e) {
+        debug("getUserCell()エラー: " + e);
+    }
+    let value = cell.getValue(); //変更
+    /*追加*/
+    if (!value) {
+        debug("新規ユーザーを作成");
+        //User情報が取得できなかった場合新規作成
+        insertValue(cell, [], userId, "", nowDate, 0, "", "", "", "", "", 0, 0, []);
+        value = cell.getValue();
+    }
+
+    let previousContext = [];
+    let userData = null;
+    let dailyUsage = 0;
+    let messages = [];
+
+    debug("ユーザー情報を取得");
+    userData = JSON.parse(value);
+    const decryptedMessages = [];
+    for (var i = 0; i < userData.messages.length; i++) {
+        decryptedMessages.push({
+            role: userData.messages[i]["role"],
+            content: sc.decrypt(userData.messages[i]["content"]),
+        });
+    }
+    debug(userData);
+    userData.messages = decryptedMessages ?? [];
+    /// UserID があっている場合のみメッセージを取得する
+    if (userId == userData.userId) {
+        previousContext = userData.messages;
+        const updatedDate = new Date(userData.updatedDateString);
+        dailyUsage = userData.dailyUsage ?? 0;
+        if (updatedDate && isBeforeYesterday(updatedDate, nowDate)) {
+            //使用日が昨日以前の場合初期化
+            dailyUsage = 0;
+        }
+    }
+
+    let userMessage = event.message.text;
+
+    //変更及び追加
+    debug(userData.status + "   " + userMessage + "   " + eventType)
+    if ((!userData.status || userData.status == "") &&
+        !(userMessage.indexOf("map") !== -1 || userMessage.indexOf("検索") !== -1) &&
+        eventType != "postback"
+    ) {
+        debug("ユーザーのメッセージを処理");
+
+        if (!userMessage) {
+            // メッセージ以外(スタンプや画像など)が送られてきた場合
+            return;
+        } else if (userMessage.trim() == "忘れて" || userMessage.trim() == "わすれて") {
+            if (userData && userId == userData.userId) {
+                /// UserID があっている場合のみ記憶を削除する
+                deleteValue(cell, userId, userData.updatedDateString, dailyUsage);
+            }
+            callLineApi("記憶を消去しました。", replyToken);
+            return;
+        }
+        debug("ぬけた");
+        if (MAX_DAILY_USAGE && MAX_DAILY_USAGE <= dailyUsage) {
+            debug("おおいよ");
+            callLineApi(countMaxMessage, replyToken);
+            return;
+        }
+        debug("いふぉわり");
+    } else {
+        debug("マップ検索を処理");
+        //マップ検索実装
+        switch (eventType) {
+            case "message": //メッセージ受信
+                debug("メッセージイベントを処理");
+                userMessage = userMessage.replace("map", "");
+                userMessage = userMessage.replace("検索", "");
+                const searchMessageTail = `
+        
+                  上記の文から住所と検索キーワードを抽出し、下記のテンプレートに合わせて出力してください。
+                  もしない場合は代わりに住所とキーワードにはそれぞれnullと出力してください。
+                  
+                  テンプレート:
+                  住所:
+                  キーワード:
+                  `;
+
+                const searchMessage = userMessage + searchMessageTail;
+
+                let address = "";
+                let keyword = "";
+                let location = new Object();
+                let completed_count = userData.completed_count;
+                if (userData.status == "") {
+                    debug("GPT検索を実行");
+                    //GPT検索
+
+                    const checkOptions = {
+                        method: "post",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: "Bearer " + OPENAI_APIKEY,
+                        },
+                        payload: JSON.stringify({
+                            model: "gpt-3.5-turbo",
+                            messages: [
+                                { role: "assistant", content: searchMessage },
+                            ],
+                        }),
+                    };
+                    let _response;
+                    try {
+                        _response = UrlFetchApp.fetch(
+                            "https://api.openai.com/v1/chat/completions",
+                            checkOptions
+                        );
+                    } catch (e) {
+                        debug("GPT検索エラー: " + e);
+                    }
+
+                    const _responseText = _response.getContentText();
+                    const _json = JSON.parse(_responseText);
+                    const _botReply = _json["choices"][0]["message"]["content"].trim();
+                    debug(_botReply);
+                    const result= getAddressAndKeyword(
+                        _botReply
+                    );
+                    address = result[0];
+                    keyword = result[1];
+                    debug(address);
+                    debug(keyword);
+                    if (!address) {
+                        debug("アドレス無し");
+                        const address_check = confirmAddressMessage();
+                        callLineApi(address_check, replyToken);
+                        messages = buildMessages(previousContext);
+                        insertValue(
+                            cell,
+                            messages,
+                            userId,
+                            null,
+                            new Date(userData.updatedDateString),
+                            userData.dailyUsage,
+                            "address",
+                            "",
+                            "",
+                            "",
+                            "",
+                            0,
+                            0,
+                            []
+                        );
+                        return;
+                        break;
+                    }
+                    debug("アドレス有抜けます");
+                }
+
+                ///////////////////////////////////////////////////
+                debug("アドレストッパ");
+                if (
+                    userData.status == "address" ||
+                    address
+                ) {
+                    debug("住所確認中");
+                    //住所確認中
+                    var messageType = event.message.type;
+                    if (
+                        messageType != "text" &&
+                        messageType != "location"
+                    ) {
+                        //メッセージがテキスト、位置情報以外ならば終了
+                        messages = buildMessages(previousContext);
+                        insertValue(
+                            cell,
+                            messages,
+                            userId,
+                            null,
+                            new Date(userData.updatedDateString),
+                            userData.dailyUsage,
+                            "address",
+                            "",
+                            "",
+                            "",
+                            "",
+                            0,
+                            0,
+                            []
+                        );
+                        return;
+                    }
+
+                    var searchStatus;
+                    messages = buildMessages(previousContext);
+
+                    //テキスト受信
+                    if (messageType == "text") {
+                        debug("住所テキストを処理");
+                        //テキストメッセージ取得
+                        if (!address) address = event.message.text;
+                        //改行をスペースに変換
+                        address = address.replace(/\r?\n/g, " ");
+
+                        //【Geocoding API】住所→緯度・経度
+                        var ret1 = getLocation(address);
+                        if (typeof ret1 == "object") {
+                            location = ret1;
+                            searchStatus = "OK";
+                        } else {
+                            searchStatus = ret1;
+                        }
+                    }
+                    //位置情報受信
+                    else if (messageType == "location") {
+                        debug("位置情報を処理");
+                        searchStatus = "LINE_LOCATION";
+
+                        //LINEから送られてきた緯度・経度を取得
+                        location.lat = event.message.latitude;
+                        location.lng = event.message.longitude;
+                        //LINEから送られてきた住所を取得
+                        address = event.message.address;
+                    }
+
+                    //位置情報取得成功
+                    if (
+                        (searchStatus == "OK" ||
+                            searchStatus == "LINE_LOCATION")
+                        && !keyword
+                    ) {
+                        debug("住所取得成功");
+                        //キーワード確認メッセージ作成
+                        var keyword_check = confirmKeywordMessage();
+                        debug("アドレス無しメッセ作成");
+                        callLineApi(keyword_check, replyToken);
+                        debug("メッセ送信、保存処理開始");
+                        //ユーザー情報にAddressを保存
+                        insertValue(
+                            cell,
+                            messages,
+                            userId,
+                            null,
+                            new Date(userData.updatedDateString),
+                            userData.dailyUsage,
+                            "keyword",
+                            address,
+                            location.lat,
+                            location.lng,
+                            "",
+                            0,
+                            0,
+                            []
+                        );
+                        debug("保存処理終了");
+                        return;
+                    }
+                    //検索結果ゼロ
+                    else if (searchStatus == "ZERO_RESULTS") {
+                        debug("住所検索結果ゼロ");
+                        //住所検索結果ゼロのメッセージ作成
+                        var zeroAddress = zeroAddressMessage();
+                        callLineApi(zeroAddress, replyToken);
+                        debug("結果送信、保存かいし");
+                        messages = buildMessages(previousContext);
+                        insertValue(
+                            cell,
+                            messages,
+                            userId,
+                            null,
+                            new Date(userData.updatedDateString),
+                            userData.dailyUsage,
+                            "address",
+                            "",
+                            "",
+                            "",
+                            "",
+                            0,
+                            0,
+                            []
+                        );
+                        debug("保存処理終了");
+                        return;
+                    }
+                    //Google Maps APIのエラー
+                    else if (!(searchStatus == "OK" ||
+                        searchStatus == "LINE_LOCATION"))  {
+                        debug("Google Maps APIエラー: " + searchStatus);
+                        //Google Maps APIのエラーメッセージ作成
+                        var googleError = googleErrorMessage("【Geocoding API】", searchStatus);
+                        messages = buildMessages(previousContext)
+                        debug("データ保存");
+                        insertValue(cell, messages, userId, null, new Date(userData.updatedDateString),
+                            userData.dailyUsage ?? 0, "", "", "", "", "", 0, 0, [])
+                        debug("Message送信完了");
+                        callLineApi(googleError.text, replyToken);
+                        debug("メッセージ送信完了");
+                        return;
+                    }
+
+                }
+                ///////////////////////////////////////////////////
+
+                if (userData.status == "keyword" || userData.status == "searched" || keyword) {//キーワード確認中//検索終了後
+                    debug("キーワード確認中");
+                    var messageType = event.message.type;
+                    if (messageType != "text") {
+                        debug("終了");
+                        //メッセージがテキスト、位置情報以外ならば終了
+                        messages = buildMessages(previousContext)
+                        insertValue(cell, messages, userId, null, new Date(userData.updatedDateString),
+                            userData.dailyUsage, "", "", "", "", "", 0, 0, [])
+                        return;
+                    }
+                    debug("Message取得処理開始");
+                    //テキストメッセージ取得
+                    if (!keyword)
+                        keyword = event.message.text;
+                    debug("改行をスペースに変換");
+                    //改行をスペースに変換
+                    keyword = keyword.replace(/\r?\n/g, " ");
+                    debug("前後のスペースを除去");
+                    //前後のスペースを除去
+                    keyword = keyword.trim();
+                    debug("なしはキーワードをクリア");
+                    //「なし」は指定なしの意味なので、キーワードをクリア
+                    if (keyword == "なし") {
+                        keyword = "";
+                    }
+                    debug("Locationがない場合userから取得");
+                    //ユーザ情報から緯度・経度を取得
+                    if (!location)
+                        location = { lat: userData.lat, lng: userData.lng };
+                    var placesList = new Array();
+                    debug("お店情報取得開始");
+                    //【Places API】検索エリアのお店情報取得
+                    var ret1 = getPlace(location.lat, location.lng, keyword);
+                    debug("取得成功？");
+                    if (typeof (ret1) == "object") {
+                        placesList = ret1;
+                        searchStatus = "OK";
+                        debug("取得成功");
+                    } else {
+                        searchStatus = ret1;
+                        debug("失敗かも");
+                    }
+
+                    //お店情報取得成功
+                    if (searchStatus == "OK") {
+                        debug("お店情報取得成功");
+                        //検索完了メッセージ作成
+                        var finishMessage = [];
+                        var searchFinish = searchFinishMessage(address, keyword, completed_count);
+                        finishMessage.push(searchFinish);
+                        //お店情報メッセージ作成
+                        debug("お店情報メッセージ作成");
+                        var places = placesMessage(cell, userRow);
+                        finishMessage.push(places);
+                        debug("メッセージ送信");
+                        callLineApi(finishMessage, replyToken);
+                        debug("メッセージ送信完了保存処理開始");
+                        messages = buildMessages(previousContext)
+                        insertValue(cell, messages, userId, null, new Date(userData.updatedDateString),
+                            userData.dailyUsage, "searched", address, location.lat, location.lng, keyword, placesList.length, completed_count, placesList)
+                        debug("保存処理完了");
+                    }
+                    //検索結果ゼロ
+                    else if (searchStatus == "ZERO_RESULTS") {
+                        debug("お店検索結果ゼロ");
+                        //お店検索結果ゼロのメッセージ作成
+                        debug("めっせーじさくせい");
+                        var zeroPlace = zeroPlaceMessage(userRow);
+                        messages = buildMessages(previousContext)
+                        debug("作成完了保存処理開始");
+                        insertValue(cell, messages, userId, null, new Date(userData.updatedDateString),
+                            userData.dailyUsage, "address", "", "", "", "", 0, 0, [])
+                        debug("保存完了メッセージ送信");
+                        callLineApi(zeroPlace, replyToken);
+                        debug("送信完了");
+                        return;
+                    }
+                    //Google Maps APIのエラー
+                    else {
+                        debug("Google Maps APIエラー: " + searchStatus);
+                        //Google Maps APIのエラーメッセージ作成
+                        var googleError = googleErrorMessage("【Places API】", searchStatus);
+                        messages = buildMessages(previousContext)
+                        debug("エラーメッセージ作成完了保存処理開始");
+                        insertValue(cell, messages, userId, null, new Date(userData.updatedDateString),
+                            userData.dailyUsage, "", "", "", "", "", 0, 0, [])
+                        debug("保存完了メッセージ送信");
+                        callLineApi(googleError.text, replyToken);
+                        debug("送信完了");
+                        return;
+                    }
+
+                    break;
+                }
+            case "postback":  //ボタン操作による応答
+                debug("ボタン操作を処理");
+                //「最初から検索」を選択
+                if (event.postback.data == "gotoFirst") {
+                    debug("最初から検索を選択");
+                    //最初から検索するための処理
+                    const address_check = confirmAddressMessage()
+                    debug("最初から検索の住所確認メッセージ送信");
+                    callLineApi(address_check, replyToken)
+                    debug("保存処理開始");
+                    messages = buildMessages(previousContext)
+                    insertValue(cell, messages, userId, null, new Date(userData.updatedDateString),
+                        userData.dailyUsage, "address", "", "", "", "", 0, 0, [])
+                    debug("キーワード確認中");
+                    return;
+                    break;
+                }
+                //「続きを見る」を選択
+                else if (event.postback.data == "nextResults") {
+                    debug("続きを見るを選択");
+                    //次の結果表示
+                    messages = nextResultsMessage(cell, userId);
+
+                    //LINEの応答
+                    if (messages.length > 0) {
+                        callLineApi(messages, replyToken)
+                    }
+
+                    break;
+
+                }
+        }
+    }
+    debug("メッセージ作成");
+    messages = buildMessages(previousContext, userMessage)
+    debug("GPTメッセージ作成");
+    const requestOptions = {
+        "method": "post",
+        "headers": {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + OPENAI_APIKEY
+        },
+        "payload": JSON.stringify({
+            "model": "gpt-3.5-turbo",
+            "messages": messages
+        })
+    }
+    let response
+
+    try {
+        debug("GPT処理");
+        response = UrlFetchApp.fetch("https://api.openai.com/v1/chat/completions", requestOptions);
+    } catch (e) {
+        debug("APIリクエストエラー: " + e);
+        callLineApi(errorMessage, replyToken);
+    }
+    debug("終了");
+    const responseText = response.getContentText()
+    const json = JSON.parse(responseText)
+    const botReply = json['choices'][0]['message']['content'].trim()
+    debug(botReply);
+
+    if (userData && userId == userData.userId || !value) {
+        /// UserID があっているか、初期の場合のみメッセージを保存する
+        debug("保存");
+        insertValue(cell, messages, userId, botReply, nowDate,
+            dailyUsage + 1, "", "", "", "", "", 0, 0, [])
+        debug("保存おわり");
+    }
+
+    callLineApi(botReply, replyToken)
+
+}
+
+
+
+function isBeforeYesterday(date, now) {
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    return today > date
+}
+
+function testGetScriptProperties() {
+    const props = PropertiesService.getScriptProperties()
+    console.log(props.getProperty('OPENAI_APIKEY').substring(0, 30))
+    console.log(props.getProperty('LINE_ACCESS_TOKEN').substring(0, 30))
+    console.log(props.getProperty('SPREADSHEET_ID').substring(0, 30))
+    console.log(parseInt(props.getProperty('MAX_DAILY_USAGE')))
+}
+
+function testIsBeforeYesterday() {
+    console.log('testIsBeforeYesterday')
+    const day1 = new Date('2023-03-24')
+    const day2 = new Date('2033-03-24')
+    console.log(isBeforeYesterday(day1, new Date()))
+    console.log(isBeforeYesterday(day2, new Date()))
+
+    console.log(day1.toISOString())
+    console.log(new Date(day1.toISOString()))
+    console.log((new Date(day1.toISOString())).toISOString())
+    console.log(day1.toISOString() == (new Date(day1.toISOString())).toISOString())
+}
+
+/// Ensure SPREADSHEET_ID is correct
+/// Ensure debug function working correctly
+function testDebug() {
+    debug('test debug function')
+}
+
+/*ここからついかー*/
+
+
+function getAddressAndKeyword(str) {
+    const addressPattern = /住所:(.*)/;
+    const keywordPattern = /キーワード:(.*)/;
+    const address = str.match(addressPattern)[1].trim();
+    const keyword = str.match(keywordPattern)[1].trim();
+    return [ address, keyword ];
+}
+
+function getRadiusAndTypes(str) {
+    const addressPattern = /属性:(.*)/;
+    const keywordPattern = /範囲:(.*)/;
+    const address = str.match(addressPattern)[1].trim();
+    const keyword = str.match(keywordPattern)[1].trim();
+    return [address, keyword];
+}
+
+
+
+
+
+/*
+ 次の結果表示
+  userId：ユーザID
+*/
+function nextResultsMessage(cell, userData) {
+    var messages = [];
+
+    var status = userData.status;
+    //検索終了後の場合
+    if (status == "searched") {
+        //お店情報メッセージ作成
+        var msg1 = placesMessage(cell, userData);
+        messages.push(msg1);
+    }
+
+    return messages;
+}
+
+
+/*
+ お店情報メッセージ作成
+  row：ユーザ情報の対象行
+*/
+function placesMessage(cell, userData) {
+    //検索件数
+    var resultCnt = userData.searchCount;
+    //表示完了件数
+    var dispCnt = userData.completed_count;
+
+    //検索結果を表示完了件数以降から5件分取得
+    var resultsList = userData.searchResult;
+
+    //表示完了件数を更新
+    var updateCnt = dispCnt + 5;
+    if (updateCnt > resultCnt) updateCnt = resultCnt;
+    insertValue(cell, userData.message, userData.userId, null, new Date(userData.updatedDateString),
+        userData.dailyUsage, userData.status, userData.address, userData.lat, userData.lng,
+        userData.keyword, userData.searchCount, userData.completed_count, userData.searchResult)
+
+
+    //表示する検索結果分のメッセージを作成
+    var bubbleList = new Array();
+    for (var i = 0; i < resultsList.length; i++) {
+        var result = resultsList[i].split("\n");
+
+        //評価
+        var rating = result[0];
+        var star = "";
+        if (isNaN(rating) == false) {
+            rating = Math.round(rating * 10) / 10;
+            var cnt = Math.floor(Number(rating));
+            var star = new Array(cnt + 1).join("★");
+        }
+        //名前
+        var name = result[1];
+        //周辺住所
+        var vicinity = result[2];
+        //写真ID
+        var photoID = "";
+        if (result.length > 3) {
+            photoID = result[3];
+        }
+
+        //Flexメッセージに設定するBubbleメッセージを作成
+        var bubbleMsg = {
+            "type": "bubble",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": rating + " " + star,
+                        "wrap": true,
+                        "color": "#ff8c00"
+                    },
+                    {
+                        "type": "text",
+                        "text": name,
+                        "wrap": true
+                    },
+                    {
+                        "type": "text",
+                        "text": vicinity,
+                        "wrap": true,
+                        "color": "#778899",
+                        "margin": "xl"
+                    }
+                ]
+            },
+            "footer": {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "uri",
+                            "label": "詳細表示",
+                            "uri": "https://maps.google.co.jp/maps?q="
+                                + encodeURIComponent(name + " " + vicinity)
+                                + "&z=15&iwloc=A"
+                        }
+                    },
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "postback",
+                            "label": "最初から検索",
+                            "data": "gotoFirst",
+                        }
+                    }
+                ]
+            },
+            "styles": {
+                "footer": {
+                    "backgroundColor": "#b0c4de",
+                    "separator": true,
+                    "separatorColor": "#c0c0c0"
+                }
+            }
+        };
+
+        //最初の5件は画像付き
+        if (dispCnt == 0) {
+            var imgUrl = "";
+            if (photoID != "") {
+                imgUrl = getPhotoURL(photoID);
+            } else {
+                imgUrl = "https://www.delta-ss.com/labo/data/cmn/noimage.png";
+            }
+            var imgContent = {
+                "type": "image",
+                "url": imgUrl,
+                "size": "full",
+                "aspectRatio": "20:13",
+                "aspectMode": "cover",
+            };
+            bubbleMsg.hero = imgContent;
+        }
+
+        bubbleList.push(bubbleMsg);
+    }
+
+    //続きがある場合のBubbleメッセージを作成
+    var nextCnt = resultCnt - dispCnt - resultsList.length;
+    if (nextCnt > 0) {
+        var bubbleMsg2 = {
+            "type": "bubble",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "text",
+                        "text": "続きのお店情報があります！",
+                        "wrap": true,
+                        "color": "#c71585"
+                    },
+                    {
+                        "type": "text",
+                        "text": "【残り件数】" + nextCnt + "件",
+                        "wrap": true,
+                        "margin": "xl"
+                    }
+                ]
+            },
+            "footer": {
+                "type": "box",
+                "layout": "horizontal",
+                "contents": [
+                    {
+                        "type": "button",
+                        "action": {
+                            "type": "postback",
+                            "label": "続きを見る",
+                            "data": "nextResults",
+                        }
+                    }
+                ]
+            },
+            "styles": {
+                "footer": {
+                    "backgroundColor": "#e3adc1",
+                    "separator": true,
+                    "separatorColor": "#c0c0c0"
+                }
+            }
+        };
+        bubbleList.push(bubbleMsg2);
+    }
+
+    //Flexメッセージ作成
+    var flexMsg = {
+        "type": "flex",
+        "altText": "口コミランキング順お店情報",
+        "contents": {
+            "type": "carousel",
+            "contents": bubbleList
+        }
+    };
+    return flexMsg;
+}
+
+
+
+
+/*==============================
+Google Maps APIの操作
+==============================*/
+
+
+/*
+ 位置情報取得
+  address：検索場所
+*/
+function getLocation(address) {
+    //【Geocoding API】住所→緯度・経度
+    debug("【Geocoding API】住所→緯度・経度");
+    var geocodeApiUrl = "https://maps.googleapis.com/maps/api/geocode/json";
+    geocodeApiUrl += "?key=" + MAPS_APIKEY1;
+    geocodeApiUrl += "&address=" + encodeURIComponent(address);
+    debug("リクエスト送信");
+    //Geocoding APIにリクエスト
+    var options = { muteHttpExceptions: true };
+    var geocodeJson = UrlFetchApp.fetch(geocodeApiUrl, options);
+    debug("取得");
+    //JSON文字列をパースしてオブジェクトにする
+    var geocodeData = JSON.parse(geocodeJson.getContentText());
+    debug("Json" + geocodeData);
+    //緯度・経度の取得
+    var location = new Object();
+    debug("Location取得");
+    if (geocodeData.status == "OK") {
+        //緯度・経度を返却
+        location.lat = geocodeData.results[0].geometry.location.lat;
+        location.lng = geocodeData.results[0].geometry.location.lng;
+        debug("Location取得成功返却" + location);
+        return location;
+    } else {
+        //エラーの場合、APIの結果ステータスを返却
+        debug("APIエラー");
+        return geocodeData.status;
+    }
+}
+
+/*
+ お店情報取得
+  lat：検索緯度
+  lng：検索経度
+  keyword：検索キーワード
+*/
+function getPlace(lat, lng, keyword) {
+    debug("お店情報を取得開始");
+    const searchMessageTail = `
+            
+上記のキーワードの属性に一番近いものを属性一覧から選んでください。
+また、地図上で上記のキーワードに合致するものが4件以上ある範囲の平均値をメートルで表してください。
+属性と範囲を下記のテンプレートに合わせて表示してください。
+
+テンプレート:
+属性:
+範囲:
+
+
+属性一覧:
+accounting
+airport
+amusement_park
+aquarium
+art_gallery
+atm
+bakery
+bank
+bar
+beauty_salon
+bicycle_store
+book_store
+bowling_alley
+bus_station
+cafe
+campground
+car_dealer
+car_rental
+car_repair
+car_wash
+casino
+cemetery
+church
+city_hall
+clothing_store
+convenience_store
+courthouse
+dentist
+department_store
+doctor
+drugstore
+electrician
+electronics_store
+embassy
+fire_station
+florist
+funeral_home
+furniture_store
+gas_station
+gym
+hair_care
+hardware_store
+hindu_temple
+home_goods_store
+hospital
+insurance_agency
+jewelry_store
+laundry
+lawyer
+library
+light_rail_station
+liquor_store
+local_government_office
+locksmith
+lodging
+meal_delivery
+meal_takeaway
+mosque
+movie_rental
+movie_theater
+moving_company
+museum
+night_club
+painter
+park
+parking
+pet_store
+pharmacy
+physiotherapist
+plumber
+police
+post_office
+primary_school
+real_estate_agency
+restaurant
+roofing_contractor
+rv_park
+school
+secondary_school
+shoe_store
+shopping_mall
+spa
+stadium
+storage
+store
+subway_station
+supermarket
+synagogue
+taxi_stand
+tourist_attraction
+train_station
+transit_station
+travel_agency
+university
+veterinary_care
+zoo
+                `;
+
+    const searchMessage = keyword + searchMessageTail;
+    debug("GPTメッセージ作成" + searchMessage);
+
+    //GPT検索
+    const checkOptions = {
+        "method": "post",
+        "headers": {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + OPENAI_APIKEY
+        },
+        "payload": JSON.stringify({
+            "model": "gpt-3.5-turbo",
+            "messages": [{ 'role': 'assistant', 'content': searchMessage }]
+        })
+    }
+    let _response
+    try {
+        debug("GPT送信");
+        _response = UrlFetchApp.fetch("https://api.openai.com/v1/chat/completions", checkOptions);
+    } catch (e) {
+        debug(e)
+    }
+
+    const _responseText = _response.getContentText();
+    const _json = JSON.parse(_responseText);
+    const _botReply = _json['choices'][0]['message']['content'].trim();
+    debug("GPT返信" + _botReply);
+    const result = getRadiusAndTypes(_botReply);
+    debug("GPT返信" + result);
+
+
+    //【Places API】検索エリアのお店情報取得
+    debug("お店情報を取得開始");
+    debug("キーワード" + keyword);
+    var placeApiUrl = "https://maps.googleapis.com/maps/api/place/nearbysearch/json";
+    placeApiUrl += "?key=" + MAPS_APIKEY2;
+    placeApiUrl += "&location=" + lat + "," + lng;
+    placeApiUrl += "&radius=" + result[0];
+    placeApiUrl += "&types=" + result[1];
+    placeApiUrl += "&keyword=" + encodeURIComponent(keyword);
+    placeApiUrl += "&language=ja";
+    debug("送信開始");
+    //Places APIにリクエスト
+    options = { muteHttpExceptions: true };
+    var placeJson = UrlFetchApp.fetch(placeApiUrl, options);
+    debug("結果取得");
+    //JSON文字列をパースしてオブジェクトにする
+    var placeData = JSON.parse(placeJson.getContentText());
+    debug("Jsonに変換");
+    //お店情報取得
+    var placesList = new Array();
+    var nextPageToken = undefined;
+    if (placeData.status == "OK") {
+        debug("取得成功");
+        //resultsをplacesList配列に結合
+        placesList = placesList.concat(placeData.results);
+        debug("配列に結合");
+        //next_page_tokenを取得
+        nextPageToken = placeData.next_page_token;
+        debug("トークンを取得");
+    } else {
+        //エラーの場合、APIの結果ステータスを返却
+        debug("エラー発生。");
+        return placeData.status;
+    }
+
+    //next_page_tokenが取得された場合は次ページあり。
+    //next_page_tokenが取得できなくなるまで、
+    //次ページ情報の取得を繰り返す。
+    while (nextPageToken != undefined) {
+        //2秒程間隔をおく（連続リクエストすると取得に失敗する）
+        Utilities.sleep(2000);
+        debug("次ページの取得");
+        //【Places API】次ページのお店情報取得
+        placeApiUrl = "https://maps.googleapis.com/maps/api/place/nearbysearch/json";
+        placeApiUrl += "?key=" + MAPS_APIKEY2;
+        placeApiUrl += "&pagetoken=" + nextPageToken;
+
+        //Places APIにリクエスト
+        options = { muteHttpExceptions: true };
+        placeJson = UrlFetchApp.fetch(placeApiUrl, options);
+
+        //JSON文字列をパースしてオブジェクトにする
+        placeData = JSON.parse(placeJson.getContentText());
+
+        if (placeData.status == "OK") {
+            //resultsをplacesList配列に結合
+            placesList = placesList.concat(placeData.results);
+            //next_page_tokenを取得
+            nextPageToken = placeData.next_page_token;
+        } else {
+            nextPageToken = undefined;
+        }
+    }
+
+    //ソートを正しく行うため、
+    //ratingが設定されていないものを
+    //一旦「-1」に変更する。
+    for (var i = 0; i < placesList.length; i++) {
+        if (placesList[i].rating == undefined) {
+            placesList[i].rating = -1;
+        }
+    }
+    debug("ソート");
+    //ratingの降順でソート（連想配列ソート）
+    placesList.sort(function (a, b) {
+        if (a.rating > b.rating) return -1;
+        if (a.rating < b.rating) return 1;
+        return 0;
+    });
+    debug("お店情報を返却");
+    //お店情報を返却
+    return placesList;
+}
+
+/*
+ 写真URL取得
+  photoID：写真ID
+*/
+function getPhotoURL(photoID) {
+    debug("画像取得用URL生成");
+    //【Places API】Place PhotoのURL
+    var url = "https://maps.googleapis.com/maps/api/place/photo";
+    url += "?key=" + MAPS_APIKEY3;
+    url += "&maxwidth=400";
+    url += "&photoreference=" + photoID;
+    debug("URL変換");
+    return url;
+}
+
+
